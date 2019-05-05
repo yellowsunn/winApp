@@ -1,0 +1,17 @@
+winApp/winApp.sln
+winApp/.vs/winApp/v15/Browse.VC.db
+winApp/winApp/winApp.vcxproj.filters
+winApp/winApp/winApp.vcxproj
+winApp/winApp/Debug/winApp.tlog/winApp.lastbuildstate
+winApp/winApp/Debug/winApp.tlog/rc.write.1.tlog
+winApp/winApp/Debug/winApp.tlog/rc.read.1.tlog
+winApp/winApp/Debug/winApp.tlog/rc.command.1.tlog
+winApp/winApp/Debug/winApp.tlog/link.write.1.tlog
+winApp/winApp/Debug/winApp.tlog/link.read.1.tlog
+winApp/winApp/Debug/winApp.tlog/link.command.1.tlog
+winApp/winApp/Debug/winApp.tlog/CL.write.1.tlog
+winApp/winApp/Debug/winApp.tlog/CL.read.1.tlog
+winApp/winApp/Debug/winApp.tlog/CL.command.1.tlog
+winApp/winApp/Debug/winApp.res
+winApp/winApp/Debug/vc141.idb
+winApp/.vs/winApp/v15/ipch/AutoPCH/82b1d4437633b420/WINAPP.ipch
