@@ -14,11 +14,17 @@
 HWND hHandle;		// 다이얼 로그 핸들값
 SOCKET recieveSock, senderSock;
 HANDLE sendEvent;	// 보내기 버튼을 누를 경우 신호상태로 만든다(Sender 스레드 blocked 상태 해제)
+HANDLE sameEvent;
 
 char multiAddr[30];
 int port;
 char userName[30];
 char buf[BUFSIZE + 1];
+const DWORD pid = GetCurrentProcessId();	// 프로세스 ID
+DWORD getPid;
+
+//
+SOCKADDR_IN mulAdr;
 
 BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam);
 BOOL isClassD(const char * addr);
@@ -31,10 +37,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	WSADATA wsaData;
 	WSAStartup(WINSOCK_VERSION, &wsaData);
 	sendEvent = CreateEvent(NULL, FALSE, FALSE, NULL);	//비신호 상태
+	sameEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 
 	DialogBox(hInstance, MAKEINTRESOURCE(IDD_DIALOG1), NULL, DlgProc);
 
 	CloseHandle(sendEvent);
+	CloseHandle(sameEvent);
 	closesocket(recieveSock);
 	closesocket(senderSock);
 	WSACleanup();
@@ -91,13 +99,9 @@ BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam)
 			EnableWindow(hMsg, TRUE);
 			CreateThread(NULL, 0, Receiver, NULL, 0, NULL);
 			CreateThread(NULL, 0, Sender, NULL, 0, NULL);
+			CreateThread(NULL, 0, CheckSame, NULL, 0, NULL);
 
 			EnableWindow(GetDlgItem(hdlg, ID_REGISTER), FALSE);	//가입 못하게(좀더 예쁘게 나중에 수정하자)
-			////
-			char t[30];
-			sprintf(t, "%d", GetWindowThreadProcessId(hdlg, NULL));
-			MessageBox(NULL, t, "멀티캐스트 주소 에러", MB_ICONERROR);
-			///
 			return TRUE;
 		case ID_CHANGE_NAME:
 			if(recieveSock == NULL || senderSock == NULL)
@@ -152,16 +156,20 @@ DWORD WINAPI Receiver(LPVOID arg)
 	int senderAddr_sz = sizeof(senderAddr);
 	while (1)
 	{
-		char senderName[30];
-		recvfrom(recieveSock, senderName, 30, 0, (SOCKADDR*)&senderAddr, &senderAddr_sz);
-		recvfrom(recieveSock, buf, BUFSIZE, 0, (SOCKADDR *)&senderAddr, &senderAddr_sz);
+		char rcvBuf[BUFSIZE + 128];
+		recvfrom(recieveSock, rcvBuf, BUFSIZE + 128, 0, (SOCKADDR *)&senderAddr, &senderAddr_sz);
 
-		char cMsg[BUFSIZE + 100];
+		char cMsg[BUFSIZE + 256];
 		//현재시간
 		time_t t = time(NULL);
 		struct tm *tm = localtime(&t);
+		
+		memcpy((void *)&getPid, rcvBuf, sizeof(DWORD));
+		char senderName[30];
+		memcpy(senderName, rcvBuf + sizeof(DWORD), 30);
+		memcpy(buf, rcvBuf + sizeof(DWORD) + 30, BUFSIZE);	// 굳이 전역변수 buf 로 둔 이유?
 
-		sprintf(cMsg, "%s[%s:%d](%d-%d-%d %d:%d:%d) : %s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), ntohs(senderAddr.sin_port),
+		sprintf(cMsg, "%s[%s:%d](%d-%d-%d %d:%d:%d) : %s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), getPid,
 			tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
 			tm->tm_hour, tm->tm_min, tm->tm_sec, buf);
 
@@ -169,6 +177,11 @@ DWORD WINAPI Receiver(LPVOID arg)
 		int nLength = GetWindowTextLength(hmessage);
 		SendMessage(hmessage, EM_SETSEL, nLength, nLength);
 		SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)cMsg);
+
+		if (pid != getPid && !strcmp(userName, senderName ))
+		{
+			SetEvent(sameEvent);
+		}
 	}
 }
 
@@ -178,7 +191,6 @@ DWORD WINAPI Sender(LPVOID arg)
 	senderSock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (senderSock == INVALID_SOCKET) exit(-1);
 
-	SOCKADDR_IN mulAdr;
 	ZeroMemory(&mulAdr, sizeof(mulAdr));
 	mulAdr.sin_family = AF_INET;
 	mulAdr.sin_addr.s_addr = inet_addr(multiAddr);
@@ -189,19 +201,28 @@ DWORD WINAPI Sender(LPVOID arg)
 	if (setsockopt(senderSock, IPPROTO_IP, IP_MULTICAST_TTL, (char *)&ttl, sizeof(ttl)) == SOCKET_ERROR)
 		exit(-1);
 
+	char sendBuf[BUFSIZE + 128];
 	while (1)
 	{
 		WaitForSingleObject(sendEvent, INFINITE);
-		sendto(senderSock, userName, 30, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
 		GetDlgItemText(hHandle, ID_INPUT_MESSAGE, buf, 512);
-		sendto(senderSock, buf, BUFSIZE, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+		memcpy(sendBuf, (void*)&pid, sizeof(DWORD));
+		memcpy(sendBuf + sizeof(DWORD), userName, 30);
+		memcpy(sendBuf + sizeof(DWORD) + 30, buf, BUFSIZE);
+
+		sendto(senderSock, sendBuf, BUFSIZE + 128, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
 		SetDlgItemText(hHandle, ID_INPUT_MESSAGE, "");
 	}
 }
 
 DWORD WINAPI CheckSame(LPVOID arg)
 {
-	return 0;
+	while (1)
+	{
+		WaitForSingleObject(sameEvent, INFINITE);
+		char bit = 1;
+		//sendto(senderSock, &bit, 1, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+	}
 }
 BOOL isClassD(const char * addr)
 {
