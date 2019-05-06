@@ -15,6 +15,7 @@ HWND hHandle;		// 다이얼 로그 핸들값
 SOCKET recieveSock, senderSock;
 HANDLE sendEvent;	// 보내기 버튼을 누를 경우 신호상태로 만든다(Sender 스레드 blocked 상태 해제)
 HANDLE sameEvent;
+BOOL alreadySame = FALSE;	//같은 아이디가 이미 존재하면 TRUE
 
 char multiAddr[30];
 int port;
@@ -156,31 +157,69 @@ DWORD WINAPI Receiver(LPVOID arg)
 	int senderAddr_sz = sizeof(senderAddr);
 	while (1)
 	{
-		char rcvBuf[BUFSIZE + 128];
-		recvfrom(recieveSock, rcvBuf, BUFSIZE + 128, 0, (SOCKADDR *)&senderAddr, &senderAddr_sz);
+		char rcvBuf[sizeof(DWORD) + sizeof(BOOL) + 30 + BUFSIZE];
+		int recvSize = recvfrom(recieveSock, rcvBuf, sizeof(rcvBuf), 0, (SOCKADDR *)&senderAddr, &senderAddr_sz);
 
-		char cMsg[BUFSIZE + 256];
-		//현재시간
-		time_t t = time(NULL);
-		struct tm *tm = localtime(&t);
-		
-		memcpy((void *)&getPid, rcvBuf, sizeof(DWORD));
-		char senderName[30];
-		memcpy(senderName, rcvBuf + sizeof(DWORD), 30);
-		memcpy(buf, rcvBuf + sizeof(DWORD) + 30, BUFSIZE);	// 굳이 전역변수 buf 로 둔 이유?
-
-		sprintf(cMsg, "%s[%s:%d](%d-%d-%d %d:%d:%d) : %s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), getPid,
-			tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-			tm->tm_hour, tm->tm_min, tm->tm_sec, buf);
-
-		HWND hmessage = GetDlgItem(hHandle, ID_MESSAGE_BOX);
-		int nLength = GetWindowTextLength(hmessage);
-		SendMessage(hmessage, EM_SETSEL, nLength, nLength);
-		SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)cMsg);
-
-		if (pid != getPid && !strcmp(userName, senderName ))
+		if (recvSize == sizeof(DWORD) + 30)	// 대화명과 PID 전달해서 같은 대화명이 있는 프로세스가 있는 지 검사
 		{
-			SetEvent(sameEvent);
+			DWORD tempPid;
+			memcpy((void *)&tempPid, rcvBuf, sizeof(DWORD));
+			char tempName[30];
+			memcpy(tempName, rcvBuf + sizeof(DWORD), 30);
+			if (GetCurrentProcessId() != tempPid && !strcmp(userName, tempName))
+			{
+				sendto(senderSock, (char *)&tempPid, sizeof(DWORD), 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+			}
+		}
+		else if (recvSize == sizeof(DWORD))	// 같은 대화명이 이미 존재하는 프로세스를 찾는 
+		{
+			DWORD tempPid;
+			memcpy((void *)&tempPid, rcvBuf, sizeof(DWORD));
+			if (GetCurrentProcessId() == tempPid) // 같은 대화명을 가진 프로세스 
+			{
+				alreadySame = TRUE;
+			}
+		}
+		else if(recvSize == sizeof(DWORD) + sizeof(BOOL) + 30 + BUFSIZE)
+		{
+			char cMsg[BUFSIZE + 256];
+			//현재시간
+			time_t t = time(NULL);
+			struct tm *tm = localtime(&t);
+
+			memcpy((void *)&getPid, rcvBuf, sizeof(DWORD));	//pid
+			BOOL getAlreadySame;
+			memcpy((void *)&getAlreadySame, rcvBuf + sizeof(DWORD), sizeof(BOOL));	// 보낸 곳의 alreaySame
+			char senderName[30];
+			memcpy(senderName, rcvBuf + sizeof(DWORD) + sizeof(BOOL), 30);
+			memcpy(buf, rcvBuf + sizeof(DWORD) + sizeof(BOOL)+ 30, BUFSIZE);	// 굳이 전역변수 buf 로 둔 이유?
+
+			sprintf(cMsg, "%s[%s:%d](%d-%d-%d %d:%d:%d) : %s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), getPid,
+				tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+				tm->tm_hour, tm->tm_min, tm->tm_sec, buf);
+
+			HWND hmessage = GetDlgItem(hHandle, ID_MESSAGE_BOX);
+			int nLength = GetWindowTextLength(hmessage);
+			SendMessage(hmessage, EM_SETSEL, nLength, nLength);
+			SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)cMsg);
+
+			if (GetCurrentProcessId() != getPid && !strcmp(userName, senderName) && getAlreadySame)
+			{
+				char buf[sizeof(DWORD) + 1];
+				memcpy(buf, (void *)&getPid, sizeof(DWORD));
+				sendto(senderSock, buf, sizeof(buf), 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+			}
+		}
+		else if (recvSize == sizeof(DWORD) + 1)
+		{
+			DWORD tempPid;
+			memcpy((void*)&tempPid, rcvBuf, sizeof(DWORD));
+			if (tempPid == GetCurrentProcessId())
+			{
+				char buf[40];
+				sprintf(buf, "동일한 아이디가 있습니다.(%d)", tempPid);
+				MessageBox(NULL, buf, "대화명 변경 에러", MB_ICONERROR);
+			}
 		}
 	}
 }
@@ -201,27 +240,31 @@ DWORD WINAPI Sender(LPVOID arg)
 	if (setsockopt(senderSock, IPPROTO_IP, IP_MULTICAST_TTL, (char *)&ttl, sizeof(ttl)) == SOCKET_ERROR)
 		exit(-1);
 
-	char sendBuf[BUFSIZE + 128];
+	SetEvent(sameEvent);	// 같은 아이디가 존재하는 지 체크하는 스레드 Block 해제
+	char sendBuf[sizeof(DWORD) + sizeof(BOOL) + 30 + BUFSIZE];
 	while (1)
 	{
 		WaitForSingleObject(sendEvent, INFINITE);
 		GetDlgItemText(hHandle, ID_INPUT_MESSAGE, buf, 512);
-		memcpy(sendBuf, (void*)&pid, sizeof(DWORD));
-		memcpy(sendBuf + sizeof(DWORD), userName, 30);
-		memcpy(sendBuf + sizeof(DWORD) + 30, buf, BUFSIZE);
+		memcpy(sendBuf, (void*)&pid, sizeof(DWORD));			// PID
+		memcpy(sendBuf + sizeof(DWORD), (void *)&alreadySame, sizeof(BOOL));	// alreaySame
+		memcpy(sendBuf + sizeof(DWORD) + sizeof(BOOL), userName, 30);			// userName
+		memcpy(sendBuf + sizeof(DWORD) + sizeof(BOOL) + 30, buf, BUFSIZE);		// BUF
 
-		sendto(senderSock, sendBuf, BUFSIZE + 128, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+		sendto(senderSock, sendBuf, sizeof(sendBuf), 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
 		SetDlgItemText(hHandle, ID_INPUT_MESSAGE, "");
 	}
 }
 
-DWORD WINAPI CheckSame(LPVOID arg)
+ DWORD WINAPI CheckSame(LPVOID arg)
 {
 	while (1)
 	{
 		WaitForSingleObject(sameEvent, INFINITE);
-		char bit = 1;
-		//sendto(senderSock, &bit, 1, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));
+		char buf[sizeof(DWORD) + 30];
+		memcpy(buf, (void*)&pid, sizeof(DWORD));
+		memcpy(buf + sizeof(DWORD), userName, 30);
+		sendto(senderSock, buf, sizeof(DWORD) + 30, 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));	// 같은 아이디가 존재하는지 체크
 	}
 }
 BOOL isClassD(const char * addr)
