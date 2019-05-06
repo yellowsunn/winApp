@@ -24,7 +24,6 @@ char buf[BUFSIZE + 1];
 const DWORD pid = GetCurrentProcessId();	// 프로세스 ID
 DWORD getPid;
 
-//
 SOCKADDR_IN mulAdr;
 
 BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam);
@@ -109,11 +108,15 @@ BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam)
 				MessageBox(NULL, "가입한 후에 변경 가능합니다.", "대화명 변경 에러", MB_ICONERROR);
 			else
 			{
-				char temp[30];
+				char temp[30+30 + sizeof(DWORD)];
 				GetDlgItemText(hdlg, ID_USER_NAME, temp, 30);
-				if (strlen(temp) != 0)
+				if (strlen(temp) != 0 && strncmp(userName, temp, 30) != 0)
 				{
-					strcpy(userName, temp);
+					memcpy(temp + 30, userName, 30);
+					memcpy(temp + 60, (void *)&pid, sizeof(DWORD));
+					strncpy(userName, temp, 30);
+					sendto(senderSock, temp, 30 + 30 + sizeof(DWORD), 0, (SOCKADDR *)&mulAdr, sizeof(mulAdr));	//변경된 아이디를 전달
+					SetEvent(sameEvent);	// 같은 아이디가 존재하는 지 체크하는 스레드 Block 해제
 				}
 			}
 			break;
@@ -194,9 +197,9 @@ DWORD WINAPI Receiver(LPVOID arg)
 			memcpy(senderName, rcvBuf + sizeof(DWORD) + sizeof(BOOL), 30);
 			memcpy(buf, rcvBuf + sizeof(DWORD) + sizeof(BOOL)+ 30, BUFSIZE);	// 굳이 전역변수 buf 로 둔 이유?
 
-			sprintf(cMsg, "%s[%s:%d](%d-%d-%d %d:%d:%d) : %s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), getPid,
+			sprintf(cMsg, "%s[%s](%d-%d-%d %d:%d:%d)(PID : %d) : \r\n->%s\r\n", senderName, inet_ntoa(senderAddr.sin_addr), 
 				tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-				tm->tm_hour, tm->tm_min, tm->tm_sec, buf);
+				tm->tm_hour, tm->tm_min, tm->tm_sec, getPid, buf);
 
 			HWND hmessage = GetDlgItem(hHandle, ID_MESSAGE_BOX);
 			int nLength = GetWindowTextLength(hmessage);
@@ -217,9 +220,30 @@ DWORD WINAPI Receiver(LPVOID arg)
 			if (tempPid == GetCurrentProcessId())
 			{
 				char buf[40];
-				sprintf(buf, "동일한 아이디가 있습니다.(%d)", tempPid);
-				MessageBox(NULL, buf, "대화명 변경 에러", MB_ICONERROR);
+				sprintf(buf, "다른 유저가 사용하고 있는 대화명 입니다.\n(오류가 발생한 Process ID : %d)", GetCurrentProcessId());
+				MessageBox(NULL, buf, "동일한 대화명 사용", MB_ICONERROR);
 			}
+		}
+		else if (recvSize == (30 + 30 + sizeof(DWORD)))
+		{
+			char changedName[30];
+			strncpy(changedName, rcvBuf, 30);
+			char prevName[30];
+			strncpy(prevName, rcvBuf + 30, 30);
+			DWORD tempPid;
+			memcpy((void *)&tempPid, rcvBuf + 60, sizeof(DWORD));
+
+			time_t t = time(NULL);
+			struct tm *tm = localtime(&t);
+
+			char buf[100];
+			sprintf(buf, "%s(님)(PID : %d)의 대화명이 %s(으)로 변경 되었습니다.(%d-%d-%d %d:%d:%d)\r\n", prevName, tempPid ,changedName, 
+				tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+				tm->tm_hour, tm->tm_min, tm->tm_sec);
+			HWND hmessage = GetDlgItem(hHandle, ID_MESSAGE_BOX);
+			int nLength = GetWindowTextLength(hmessage);
+			SendMessage(hmessage, EM_SETSEL, nLength, nLength);
+			SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)buf);
 		}
 	}
 }
