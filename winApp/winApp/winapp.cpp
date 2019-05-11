@@ -9,31 +9,35 @@
 #include <time.h>
 #include <Windows.h>
 #include "resource.h"
+
 #define BUFSIZE			512
 #define USERNAME_SIZE	50
 #define PID_SIZE		sizeof(DWORD)
 
-
-HWND gDlgHandle;						// 다이얼 로그 핸들값
+/*======================= Global Variable =======================*/
 SOCKET recieveSock, senderSock;		// 수신 소켓과 송신 소켓
+
+ //이벤트
 HANDLE sendEvent;					// 메세지 전송 버튼을 누를 경우 set되는 이벤트 (Sender 스레드 blocked 상태 해제)
 HANDLE sameEvent;					// 같은 대화명 존재하는지 확인할때 set되는 이벤트
+HANDLE checkSameDoneEvent;			// 같은 대화명이 있는 지, 없는 지 조사가 완료된 경우 set 되는 이벤트
 HANDLE changeNameEvent;				// 대화명을 변경하는 경우 set 되는 이벤트
 HANDLE initRcvSockEvent, initSndSockEvent;	// 수신, 송신 소켓이 생성,초기화 과정을 모두 마쳤을 경우 이벤트 발생
 
 BOOL gAlreadySame = FALSE;			// 같은 대화명이 이미 존재할 경우 TRUE 로 변경됨
-
-char gMultiAddr[30];					// 멀티캐스트 주소
+char gMultiAddr[30];				// 멀티캐스트 주소
 int gPort;							// 포트
-char gUserName[USERNAME_SIZE];					// 대화명
-SOCKADDR_IN gMulAdr;					// 멀티캐스트 목적지 주소
+char gUserName[USERNAME_SIZE];		// 대화명
+SOCKADDR_IN gMulAdr;				// 멀티캐스트 목적지 주소
 const DWORD currentPID = GetCurrentProcessId();	// 현재 프로세스 ID
+/*===============================================================*/
 
-
-BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam);	// 다이얼로그
-DWORD WINAPI Receiver(LPVOID arg);	// 수신한 데이터의 길이에 따라 데이터를 처리하는 스레드
-DWORD WINAPI Sender(LPVOID arg);	// 메세지를 보내는 스레드(메세지 전송 버튼을 누를 경우)
-DWORD WINAPI CheckSame(LPVOID arg);	// 가입, 대화명을 변경하면 기존에 같은 대화명이 있는지 체크하는 스레드
+/*=========================== Fuction ===========================*/
+BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam);	// 다이얼로그 동작
+ // 스레드
+DWORD WINAPI Receiver(LPVOID arg);			// 수신한 데이터의 길이에 따라 데이터를 처리하는 스레드
+DWORD WINAPI Sender(LPVOID arg);			// 메세지를 보내는 스레드(메세지 전송 버튼을 누를 경우)
+DWORD WINAPI CheckSame(LPVOID arg);			// 가입, 대화명을 변경하면 기존에 같은 대화명이 있는지 체크하는 스레드
 DWORD WINAPI ChangeUserName(LPVOID arg);	// 대화명을 변경할 경우
 
 BOOL isClassD(const char * addr);
@@ -41,6 +45,8 @@ BOOL getMulticastAddr(HWND hdlg);
 BOOL getPortNum(HWND hdlg);
 BOOL getUserName(HWND hdlg);
 void error_message(const char * msg);
+void setTitle(HWND hdlg);
+/*===============================================================*/
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
 {
@@ -48,6 +54,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	WSAStartup(WINSOCK_VERSION, &wsaData);
 	sendEvent = CreateEvent(NULL, FALSE, FALSE, NULL);		// 메세지 전송 버튼을 누를 경우 set(초기상태: reset)
 	sameEvent = CreateEvent(NULL, FALSE, FALSE, NULL);		// 같은 대화명 존재하는지 확인할때 set(초기상태: reset)
+	checkSameDoneEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  // 같은 대화명이 있는 지, 없는 지 조사가 완료된 경우 set(초기상태: reset)
 	changeNameEvent = CreateEvent(NULL, FALSE, FALSE, NULL);	// 대화명을 변경하는 경우 set (초기상태: reset)
 	initRcvSockEvent = CreateEvent(NULL, TRUE, FALSE, NULL);	// 수신 소켓이 생성과정을 마쳤을 경우 set(초기상태: reset)
 	initSndSockEvent = CreateEvent(NULL, TRUE, FALSE, NULL);	// 송신 소켓이 생성과정을 마쳤을 경우 set(초기상태: reset)
@@ -71,8 +78,8 @@ BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam)
 	{
 	// 초기 상태
 	case WM_INITDIALOG:
-		gDlgHandle = hdlg;		// 다이얼로그 핸들 값 전역 변수에 저장
-		EnableWindow(GetDlgItem(hdlg, ID_SEND_MESSAGE), FALSE);			// 초기 상태에서 가입을 하지 않으면 메세지를 보낼 수 없다.
+		setTitle(hdlg);	// 다이얼로그 제목 설정
+		EnableWindow(GetDlgItem(hdlg, ID_SEND_MESSAGE), FALSE);	// 초기 상태에서 가입을 하지 않으면 메세지를 보낼 수 없다.
 		return TRUE;
 	case WM_COMMAND:
 		switch (LOWORD(wParam))
@@ -87,13 +94,11 @@ BOOL CALLBACK DlgProc(HWND hdlg, UINT iMsg, WPARAM wParam, LPARAM lParam)
 			if (!getPortNum(hdlg)) break;		// 포트 번호를 입력 받고 확인한다.
 			if (!getUserName(hdlg)) break;		// 대화명을 입력 받고 확인한다.
 
-			// 멀티캐스트 주소, 포트, 대화명이 문제 없는 경우
-			EnableWindow(GetDlgItem(hdlg, ID_SEND_MESSAGE), TRUE);	// 메세지 전송 버튼 활성화
 			// 스레드 생성
-			CreateThread(NULL, 0, Receiver, NULL, 0, NULL);			
-			CreateThread(NULL, 0, Sender, NULL, 0, NULL);
-			CreateThread(NULL, 0, ChangeUserName, NULL, 0, NULL);
-			CreateThread(NULL, 0, CheckSame, NULL, 0, NULL);
+			CreateThread(NULL, 0, Receiver, (LPVOID)&hdlg, 0, NULL);			
+			CreateThread(NULL, 0, Sender, (LPVOID)&hdlg, 0, NULL);
+			CreateThread(NULL, 0, ChangeUserName, (LPVOID)&hdlg, 0, NULL);
+			CreateThread(NULL, 0, CheckSame, (LPVOID)&hdlg, 0, NULL);
 
 			EnableWindow(GetDlgItem(hdlg, ID_REGISTER), FALSE);	// 가입이 완료되면 가입 버튼 비활성화
 			SetEvent(sameEvent); // 같은 아이디가 존재하는 지 체크하는 이벤트 set
@@ -148,6 +153,7 @@ DWORD WINAPI Receiver(LPVOID arg)
 
 	SOCKADDR_IN senderAddr;
 	int senderAddr_sz = sizeof(senderAddr);
+	HWND dlgHandle = *((HWND *)arg);	// 다이얼로그 핸들
 	while (1)
 	{
 		char rcvBuf[PID_SIZE + sizeof(BOOL) + USERNAME_SIZE + BUFSIZE];
@@ -170,6 +176,11 @@ DWORD WINAPI Receiver(LPVOID arg)
 				// 같은 대화명을 가진 다른 프로세스의 PID 값을 데이터로 전달한다.
 				sendto(senderSock, (char *)&getPID, PID_SIZE, 0, (SOCKADDR *)&gMulAdr, sizeof(gMulAdr));
 			}
+			else
+			{
+				SetEvent(checkSameDoneEvent);
+				EnableWindow(GetDlgItem(dlgHandle, ID_SEND_MESSAGE), TRUE);	// 메세지 전송 버튼 활성화
+			}
 		}
 
 		// 다른 프로세스가 먼저 같은 대화명을 사용하고 있다면
@@ -180,9 +191,9 @@ DWORD WINAPI Receiver(LPVOID arg)
 			DWORD getPID;	// 전달받은 프로세스의 PID
 			memcpy((void *)&getPID, rcvBuf, PID_SIZE);
 			if (currentPID == getPID)
-			{
 				gAlreadySame = TRUE;
-			}
+			SetEvent(checkSameDoneEvent);
+			EnableWindow(GetDlgItem(dlgHandle, ID_SEND_MESSAGE), TRUE);	// 메세지 전송 버튼 활성화
 		}
 
 		// 메세지 전송 버튼을 눌러 전달받은 데이터를 메세지 박스에 출력한다.
@@ -196,6 +207,20 @@ DWORD WINAPI Receiver(LPVOID arg)
 			memcpy((void *)&getAlreadySame, rcvBuf + PID_SIZE, sizeof(BOOL));
 			char getName[USERNAME_SIZE]; // 전달 받은 대화명
 			memcpy(getName, rcvBuf + PID_SIZE + sizeof(BOOL), USERNAME_SIZE);
+
+			// 대화명을 먼저 사용하는 프로세스가
+			// 중복된 대화명을 사용하는 다른 프로세스에게 오류 데이터를 전달
+			if (!strcmp(gUserName, getName) && getAlreadySame)
+			{
+				if (GetCurrentProcessId() != getPID)
+				{
+					char buf[PID_SIZE + 1];
+					memcpy(buf, (void *)&getPID, PID_SIZE);
+					sendto(senderSock, buf, sizeof(buf), 0, (SOCKADDR *)&gMulAdr, sizeof(gMulAdr));
+				}
+				continue;
+			}
+
 			char buf[BUFSIZE];	// 전달 받은 메세지
 			memcpy(buf, rcvBuf + PID_SIZE + sizeof(BOOL) + USERNAME_SIZE, BUFSIZE);
 
@@ -208,19 +233,10 @@ DWORD WINAPI Receiver(LPVOID arg)
 				tm->tm_hour, tm->tm_min, tm->tm_sec, buf);
 
 			// 메세지를 메세지 상자에 띄운다.
-			HWND hmessage = GetDlgItem(gDlgHandle, ID_MESSAGE_BOX);
+			HWND hmessage = GetDlgItem(dlgHandle, ID_MESSAGE_BOX);
 			int nLength = GetWindowTextLength(hmessage);
 			SendMessage(hmessage, EM_SETSEL, nLength, nLength);
 			SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)totalMsg);
-
-			// 대화명을 먼저 사용하는 프로세스가
-			// 중복된 대화명을 사용하는 다른 프로세스에게 오류 데이터를 전달
-			if (GetCurrentProcessId() != getPID && !strcmp(gUserName, getName) && getAlreadySame)
-			{
-				char buf[PID_SIZE + 1];
-				memcpy(buf, (void *)&getPID, PID_SIZE);
-				sendto(senderSock, buf, sizeof(buf), 0, (SOCKADDR *)&gMulAdr, sizeof(gMulAdr));
-			}
 		}
 
 		// 전달받은 오류 데이터
@@ -260,7 +276,7 @@ DWORD WINAPI Receiver(LPVOID arg)
 				tm->tm_hour, tm->tm_min, tm->tm_sec);
 
 			// 대화명 변경 결과를 메세지 박스에 출력
-			HWND hmessage = GetDlgItem(gDlgHandle, ID_MESSAGE_BOX);
+			HWND hmessage = GetDlgItem(dlgHandle, ID_MESSAGE_BOX);
 			int nLength = GetWindowTextLength(hmessage);
 			SendMessage(hmessage, EM_SETSEL, nLength, nLength);
 			SendMessage(hmessage, EM_REPLACESEL, FALSE, (LPARAM)buf);
@@ -287,33 +303,40 @@ DWORD WINAPI Sender(LPVOID arg)
 	SetEvent(initSndSockEvent);	// 송신 소켓 생성, 초기화 완료 이벤트 set
 
 	char sendBuf[PID_SIZE + sizeof(BOOL) + USERNAME_SIZE + BUFSIZE];
+	HANDLE events[3] = { sendEvent, initRcvSockEvent, checkSameDoneEvent };
+	HWND dlgHandle = *((HWND *)arg);	// 다이얼로그 핸들
 	while (1)
 	{
+		// 수신 소켓이 생성, 초기화 완료
 		// 메세지 전송 버튼을 누르면 blocked 상태 해제
-		WaitForSingleObject(sendEvent, INFINITE);
+		WaitForMultipleObjects(3, events, TRUE, INFINITE);
+		EnableWindow(GetDlgItem(dlgHandle, ID_CHANGE_NAME), FALSE);	// 대화명 변경 버튼 비활성화
 		char buf[BUFSIZE];
-		GetDlgItemText(gDlgHandle, ID_INPUT_MESSAGE, buf, BUFSIZE);
+		GetDlgItemText(dlgHandle, ID_INPUT_MESSAGE, buf, BUFSIZE);
 		memcpy(sendBuf, (void*)&currentPID, PID_SIZE);							// 버퍼에 PID 저장
 		memcpy(sendBuf + PID_SIZE, (void *)&gAlreadySame, sizeof(BOOL));		// 버퍼에 gAlreadySame 저장 (gAlreadySame : 중복된 대화명을 사용하는 지 여부)
 		memcpy(sendBuf + PID_SIZE + sizeof(BOOL), gUserName, USERNAME_SIZE);	// 버퍼에 대화명 저장
-		memcpy(sendBuf + PID_SIZE + sizeof(BOOL) + USERNAME_SIZE, buf, BUFSIZE);			// 버퍼에 전송할 메세지 저장
+		memcpy(sendBuf + PID_SIZE + sizeof(BOOL) + USERNAME_SIZE, buf, BUFSIZE);// 버퍼에 전송할 메세지 저장
 
 		// 데이터(pid, gAlreadySame 변수값 , 대화명, 전송할 메세지) 전달
 		sendto(senderSock, sendBuf, sizeof(sendBuf), 0, (SOCKADDR *)&gMulAdr, sizeof(gMulAdr));
-		SetDlgItemText(gDlgHandle, ID_INPUT_MESSAGE, "");
+		SetDlgItemText(dlgHandle, ID_INPUT_MESSAGE, "");
+		EnableWindow(GetDlgItem(dlgHandle, ID_CHANGE_NAME), TRUE);	// 대화명 변경 버튼 활성화
 	}
 }
 
 DWORD WINAPI ChangeUserName(LPVOID arg)
 {
 	HANDLE events[3] = { changeNameEvent, initRcvSockEvent, initSndSockEvent};
+	HWND dlgHandle = *((HWND *)arg);	// 다이얼로그 핸들
 	while (1)
 	{
 		// 수신, 생성 소켓이 생성, 초기화 되고
 		// 대화명 변경 버튼을 누른 경우
 		WaitForMultipleObjects(3, events, TRUE, INFINITE);
+		gAlreadySame = FALSE;
 		char temp[USERNAME_SIZE*2 + PID_SIZE];	
-		GetDlgItemText(gDlgHandle, ID_USER_NAME, temp, USERNAME_SIZE); //temp에 변경후 대화명 저장
+		GetDlgItemText(dlgHandle, ID_USER_NAME, temp, USERNAME_SIZE); //temp에 변경후 대화명 저장
 
 		// 공백이 아니고, 기존의 대화명과 다른 경우
 		if (strlen(temp) != 0 && strncmp(gUserName, temp, USERNAME_SIZE) != 0)
@@ -328,14 +351,17 @@ DWORD WINAPI ChangeUserName(LPVOID arg)
 	}
 }
 
- DWORD WINAPI CheckSame(LPVOID arg)
+DWORD WINAPI CheckSame(LPVOID arg)
 {
 	HANDLE events[3] = { sameEvent, initRcvSockEvent, initSndSockEvent };
+	HWND dlgHandle = *((HWND *)arg);	// 다이얼로그 핸들
 	while (1)
 	{
 		// 수신, 송신 소켓이 생성, 초기화가 완료되고
 		// 가입, 대화명 변경 시 같은 아이디가 존재하는 지 검사하고자 하는 경우
 		WaitForMultipleObjects(3, events, TRUE ,INFINITE);
+		EnableWindow(GetDlgItem(dlgHandle, ID_SEND_MESSAGE), FALSE);	// 메세지 전송 버튼 비활성화
+		ResetEvent(checkSameDoneEvent);
 		char buf[PID_SIZE + USERNAME_SIZE];
 		memcpy(buf, (void*)&currentPID, sizeof(DWORD));	// 버퍼에 PID 저장
 		memcpy(buf + sizeof(DWORD), gUserName, USERNAME_SIZE);	// 버퍼에 대화명 저장
@@ -343,6 +369,7 @@ DWORD WINAPI ChangeUserName(LPVOID arg)
 		sendto(senderSock, buf, sizeof(buf), 0, (SOCKADDR *)&gMulAdr, sizeof(gMulAdr)); 
 	}
 }
+
 BOOL isClassD(const char * addr)
 {
 	ULONG uAddr;
@@ -353,7 +380,6 @@ BOOL isClassD(const char * addr)
 	else
 		return FALSE;
 }
-
 BOOL getMulticastAddr(HWND hdlg)
 {
 	GetDlgItemText(hdlg, ID_MULTICAST_ADDR, gMultiAddr, 30);
@@ -366,7 +392,6 @@ BOOL getMulticastAddr(HWND hdlg)
 	}
 	return TRUE;
 }
-
 BOOL getPortNum(HWND hdlg)
 {
 	char temp[10];
@@ -374,14 +399,13 @@ BOOL getPortNum(HWND hdlg)
 	gPort = atoi(temp);
 	if (gPort == 0 || !(gPort > 0 && gPort <= USHRT_MAX))
 	{
-		MessageBox(NULL, "잘못된 포트 번호 입니다.", "포트 번호 에러", MB_ICONERROR);
+		MessageBox(NULL, "잘못된 포트 번호 입니다. (최대: 65,535)", "포트 번호 에러", MB_ICONERROR);
 		SetDlgItemText(hdlg, ID_PORT_NUM, "");
 		SetFocus(GetDlgItem(hdlg, ID_PORT_NUM));
 		return FALSE;
 	}
 	return TRUE;
 }
-
 BOOL getUserName(HWND hdlg)
 {
 	GetDlgItemText(hdlg, ID_USER_NAME, gUserName, USERNAME_SIZE);
@@ -393,9 +417,15 @@ BOOL getUserName(HWND hdlg)
 	}
 	return TRUE;
 }
-
 void error_message(const char * msg)
 {
 	MessageBox(NULL, msg, NULL, MB_ICONERROR);
 	exit(-1);
+}
+void setTitle(HWND hdlg)
+{
+
+	char temp[50];
+	sprintf(temp, "멀티캐스트 채팅 (Process ID : %d)", currentPID);
+	SetWindowText(hdlg, temp);
 }
